@@ -1,0 +1,47 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Caches and DB
+*.db
+*.sqlite3
+*.sqlite
+*.log
+*.pkl
+*.cache
+*.bak
+
+# VSCode settings
+.vscode/
+
+# ChromaDB persistent storage
+chroma_db/
+chroma_cache/
+chroma_db_cache/
+db/
+cache/
+data/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Virtual environments
+.env
+.venv/
+
+# Python egg files
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Test output
+htmlcov/
+coverage.xml
+*.cover
+

@@ -175,81 +175,121 @@ class VectorDatabase:
 
         Returns:
             Optional[str]: Cached answer if found, else None
+
+        Raises:
+            ValueError: If question is empty or invalid
+            TypeError: If similarity_threshold is not numeric
         """
-        """
-        Пытается найти кэшированный ответ на вопрос, если существует достаточно похожий запрос.
-        """
+        if not question or not isinstance(question, str):
+            raise ValueError("Question must be a non-empty string")
+        if not isinstance(similarity_threshold, (int, float)):
+            raise TypeError("similarity_threshold must be numeric")
+
+        if not self.cache_db:
+            return None
+
         try:
-            if not self.cache_db:
-                self.load_or_create_cache()
-                if not self.cache_db or not hasattr(self.cache_db, "_collection"):
-                    return None
-
-            if not hasattr(self.cache_db, "_collection"):
-                return None
-
-            collection = self.cache_db._collection
-            if not hasattr(collection, "count"):
-                return None
-
-            if collection.count() == 0:
-                return None  # Кэш пуст
-
-            if not hasattr(self.cache_db, "similarity_search_with_score"):
-                return None
-
             results = self.cache_db.similarity_search_with_score(query=question, k=1)
-            if not results or len(results) == 0:
+
+            if not results:
                 return None
 
             doc, score = results[0]
-            if not hasattr(doc, "metadata"):
+            if score <= similarity_threshold:
+                answer = (
+                    doc.metadata.get("answer") if hasattr(doc, "metadata") else None
+                )
+                return str(answer) if answer is not None else None
+            else:
                 return None
 
-            if score <= similarity_threshold:
-                print(f"Кэш: Найдено совпадение с расстоянием L2 = {score:.4f}")
-                return str(doc.metadata.get("answer", ""))
-            else:
-                print(
-                    f"Кэш: Ближайшее совпадение с расстоянием L2 = {score:.4f} (выше порога {similarity_threshold})"
-                )
-                return None
         except Exception as e:
-            print(f"Ошибка при поиске в кэше: {e}")
+            print(f"Cache search error: {e}")
             return None
 
     def delete_documents(self, doc_ids: List[str]) -> None:
+        """Deletes documents from ChromaDB by their IDs.
+
+        Args:
+            doc_ids: List of document IDs to delete
+
+        Raises:
+            TypeError: If doc_ids is not a list or contains non-string items
+            ValueError: If doc_ids is empty
+            RuntimeError: If ChromaDB operations fail
         """
-        Удаляет документы из ChromaDB по их внутренним ID.
-        """
-        if not self.db or not hasattr(self.db, "delete"):
-            print(
-                "ChromaDB не инициализирована или не поддерживает удаление. Невозможно удалить документы."
-            )
+        if not isinstance(doc_ids, list):
+            raise TypeError("doc_ids must be a list")
+        if not all(isinstance(doc_id, str) for doc_id in doc_ids):
+            raise TypeError("All doc_ids must be strings")
+        if not doc_ids:
+            print("Нет ID для удаления из ChromaDB.")
             return
 
-        if doc_ids:
-            try:
-                if hasattr(self.db, "_collection"):
-                    self.db.delete(ids=doc_ids)
-                print(f"Удалено {len(doc_ids)} старых чанков из ChromaDB.")
-            except Exception as e:
-                print(f"Ошибка при удалении чанков из ChromaDB: {e}")
-        else:
-            print("Нет ID для удаления из ChromaDB.")
+        if not self.db:
+            print("ChromaDB не инициализирована. Невозможно удалить документы.")
+            return
 
-    def delete_cached_entries_by_source(self, source_file_name: str):
-        """Удаляет записи кэша, связанные с указанным источником."""
+        if not hasattr(self.db, "delete"):
+            print("ChromaDB не поддерживает удаление документов.")
+            return
+
         try:
-            if not self.cache_db:
-                print("Кэш ChromaDB не инициализирован.")
+            # Additional checks before deletion
+            if not hasattr(self.db, "_collection"):
+                print("Коллекция ChromaDB не доступна для удаления.")
                 return
 
-            # Инициализируем кэш если нужно
+            collection = self.db._collection
+            if not hasattr(collection, "count"):
+                print("Коллекция не поддерживает проверку количества документов.")
+                return
+
+            # Get current count before deletion for verification
+            initial_count = collection.count() if hasattr(collection, "count") else 0
+
+            # Perform deletion
+            self.db.delete(ids=doc_ids)
+            print(f"Удалено {len(doc_ids)} документов из ChromaDB.")
+
+            # Verify deletion if possible
+            if hasattr(collection, "count"):
+                new_count = collection.count()
+                expected_count = max(0, initial_count - len(doc_ids))
+                if new_count != expected_count:
+                    print(
+                        f"Предупреждение: Ожидалось {expected_count} документов после удаления, "
+                        f"но найдено {new_count}"
+                    )
+
+        except Exception as e:
+            raise RuntimeError(
+                f"Ошибка при удалении документов из ChromaDB: {e}"
+            ) from e
+
+    def delete_cached_entries_by_source(self, source_file_name: str) -> None:
+        """Deletes cache entries associated with the specified source file.
+
+        Args:
+            source_file_name: Name of the source file to delete entries for
+
+        Raises:
+            TypeError: If source_file_name is not a string
+            RuntimeError: If cache operations fail
+        """
+        if not isinstance(source_file_name, str):
+            raise TypeError("source_file_name must be a string")
+
+        if not self.cache_db:
+            print("Кэш ChromaDB не инициализирован.")
+            return
+
+        try:
+            # Ensure cache is loaded
             if not hasattr(self.cache_db, "_collection"):
                 self.load_or_create_cache()
                 if not hasattr(self.cache_db, "_collection"):
-                    print("Не удалось инициализировать коллекцию кэша.")
+                    print("Не удалось загрузить коллекцию кэша.")
                     return
 
             collection = self.cache_db._collection
@@ -257,7 +297,9 @@ class VectorDatabase:
                 print("Коллекция кэша не поддерживает операцию count")
                 return
 
-            if collection.count() == 0:
+            # Get count safely
+            count = collection.count() if hasattr(collection, "count") else 0
+            if count == 0:
                 print("Кэш пуст.")
                 return
 
@@ -265,15 +307,23 @@ class VectorDatabase:
                 print("Коллекция кэша не поддерживает операцию get")
                 return
 
+            # Get entries safely with type checking
             all_entries = collection.get(include=["metadatas"])
             if not all_entries or not isinstance(all_entries, dict):
                 print("Не удалось получить записи кэша.")
                 return
 
-            ids_to_delete = []
             ids = all_entries.get("ids", [])
-            metadatas = all_entries.get("metadatas", [])
+            if not isinstance(ids, list):
+                print("Неверный формат ID записей в кэше.")
+                return
 
+            metadatas = all_entries.get("metadatas", [])
+            if not isinstance(metadatas, list):
+                print("Неверный формат метаданных в кэше.")
+                return
+
+            ids_to_delete = []
             for i, doc_id in enumerate(ids):
                 if i >= len(metadatas):
                     continue
@@ -293,43 +343,62 @@ class VectorDatabase:
                 except json.JSONDecodeError as e:
                     print(f"Ошибка десериализации 'sources' для {doc_id}: {e}")
 
+            # Delete matching entries
             if ids_to_delete:
+                if not hasattr(self.cache_db, "delete"):
+                    print("Коллекция кэша не поддерживает операцию delete")
+                    return
+
                 try:
-                    if hasattr(self.cache_db, "delete"):
-                        self.cache_db.delete(ids=ids_to_delete)
-                        print(
-                            f"Удалено {len(ids_to_delete)} записей, связанных с '{source_file_name}'."
-                        )
-                    else:
-                        print("Коллекция кэша не поддерживает операцию delete")
+                    self.cache_db.delete(ids=ids_to_delete)
+                    print(
+                        f"Удалено {len(ids_to_delete)} записей, связанных с '{source_file_name}'."
+                    )
                 except Exception as e:
-                    print(f"Ошибка при удалении записей: {e}")
+                    raise RuntimeError(f"Ошибка при удалении записей: {e}")
             else:
                 print(f"Не найдено записей, связанных с '{source_file_name}'.")
+
         except Exception as e:
-            print(f"Ошибка при обработке кэша: {e}")
+            raise RuntimeError(f"Ошибка при обработке кэша: {e}")
 
     def cleanup_expired_cache_entries(self, ttl_days: float) -> None:
+        """Cleans up expired entries from the semantic cache.
+
+        Args:
+            ttl_days: Time-to-live in days for cache entries
+
+        Raises:
+            TypeError: If ttl_days is not numeric
+            ValueError: If ttl_days is negative
+            RuntimeError: If cache operations fail
         """
-        Удаляет записи из семантического кэша, срок жизни которых истек (старше ttl_days).
-        """
-        if not self.cache_db or not hasattr(self.cache_db, "_collection"):
-            print(
-                "Кэш ChromaDB не инициализирован или не имеет коллекции. Пропускаем очистку."
-            )
+        if not isinstance(ttl_days, (int, float)):
+            raise TypeError("ttl_days must be numeric")
+        if ttl_days < 0:
+            raise ValueError("ttl_days cannot be negative")
+
+        # Validate cache state
+        if not self.cache_db:
+            print("Кэш ChromaDB не инициализирован. Пропускаем очистку.")
             return
 
         try:
+            # Ensure cache is loaded
             if not hasattr(self.cache_db, "_collection"):
-                print("Коллекция кэша не доступна.")
-                return
+                self.load_or_create_cache()
+                if not hasattr(self.cache_db, "_collection"):
+                    print("Не удалось загрузить коллекцию кэша.")
+                    return
 
             collection = self.cache_db._collection
             if not hasattr(collection, "count"):
                 print("Коллекция кэша не поддерживает операцию count")
                 return
 
-            if collection.count() == 0:
+            # Get count safely
+            count = collection.count() if hasattr(collection, "count") else 0
+            if count == 0:
                 print("Кэш пуст, нет просроченных записей для очистки.")
                 print("--- Очистка кэша завершена ---")
                 return
@@ -342,17 +411,27 @@ class VectorDatabase:
                 print("Коллекция кэша не поддерживает операцию get")
                 return
 
+            # Get entries safely with type checking
             all_entries = collection.get(include=["metadatas"])
             if not all_entries or not isinstance(all_entries, dict):
                 print("Не удалось получить записи кэша для очистки.")
                 return
 
             ids = all_entries.get("ids", [])
-            metadatas = all_entries.get("metadatas", [])
+            if not isinstance(ids, list):
+                print("Неверный формат ID записей в кэше.")
+                return
 
+            metadatas = all_entries.get("metadatas", [])
+            if not isinstance(metadatas, list):
+                print("Неверный формат метаданных в кэше.")
+                return
+
+            # Process entries
             for i, doc_id in enumerate(ids):
                 if i >= len(metadatas):
                     continue
+
                 metadata = metadatas[i]
                 if not isinstance(metadata, dict):
                     continue
@@ -370,21 +449,24 @@ class VectorDatabase:
                         f"Предупреждение: Неверный формат timestamp в кэше для {doc_id}: {timestamp_str}. Ошибка: {e}"
                     )
 
+            # Delete expired entries
             if ids_to_delete:
+                if not hasattr(self.cache_db, "delete"):
+                    print("Коллекция кэша не поддерживает операцию delete")
+                    return
+
                 try:
-                    if hasattr(self.cache_db, "delete"):
-                        self.cache_db.delete(ids=ids_to_delete)
-                        print(
-                            f"Удалено {len(ids_to_delete)} просроченных записей из семантического кэша."
-                        )
-                    else:
-                        print("Коллекция кэша не поддерживает операцию delete")
+                    self.cache_db.delete(ids=ids_to_delete)
+                    print(
+                        f"Удалено {len(ids_to_delete)} просроченных записей из семантического кэша."
+                    )
                 except Exception as e:
-                    print(f"Ошибка при удалении просроченных записей из кэша: {e}")
+                    raise RuntimeError(f"Ошибка при удалении записей из кэша: {e}")
             else:
                 print("Не найдено просроченных записей в семантическом кэше.")
+
         except Exception as e:
-            print(f"Ошибка при обработке кэша: {e}")
+            raise RuntimeError(f"Ошибка при обработке кэша: {e}")
 
         print("--- Очистка кэша завершена ---")
 
@@ -440,29 +522,61 @@ def update_document_in_chroma(
     current_last_modified: float,
     stored_doc_id: Optional[str] = None,
 ) -> tuple[List[Document], List[str]]:
+    """Updates document in ChromaDB by removing old chunks and adding new ones.
+
+    Args:
+        vector_db: VectorDatabase instance
+        file_path: Path to the file being updated
+        full_text_content: Full text content of the document
+        metadata: Metadata for the document
+        current_file_hash: Current hash of the file
+        current_last_modified: Last modified timestamp
+        stored_doc_id: Optional existing document ID to update
+
+    Returns:
+        tuple: (List of new Document chunks, List of new ChromaDB IDs)
+
+    Raises:
+        TypeError: If input parameters are invalid
+        RuntimeError: If ChromaDB operations fail
     """
-    Обновляет документ в ChromaDB: удаляет старые чанки и добавляет новые.
-    """
+    if not isinstance(vector_db, VectorDatabase):
+        raise TypeError("vector_db must be a VectorDatabase instance")
+    if not isinstance(file_path, str):
+        raise TypeError("file_path must be a string")
+    if not isinstance(full_text_content, str):
+        raise TypeError("full_text_content must be a string")
+    if not isinstance(metadata, dict):
+        raise TypeError("metadata must be a dict")
+
     base_file_name_for_cache_invalidation = os.path.basename(file_path.split("#")[0])
     new_chunks: List[Document] = []
     new_chroma_ids: List[str] = []
 
+    # Delete old chunks if they exist
     if stored_doc_id and vector_db.db and hasattr(vector_db.db, "_collection"):
         try:
             ids_to_delete = []
             if "#" in file_path:
-                existing_docs_for_path = vector_db.db.get(
-                    where={"file_path": file_path}, include=["metadatas", "documents"]
-                )
-                if existing_docs_for_path and "ids" in existing_docs_for_path:
-                    ids_to_delete.extend(existing_docs_for_path["ids"])
+                if hasattr(vector_db.db, "get"):
+                    existing_docs_for_path = vector_db.db.get(
+                        where={"file_path": file_path},
+                        include=["metadatas", "documents"],
+                    )
+                    if existing_docs_for_path and isinstance(
+                        existing_docs_for_path, dict
+                    ):
+                        ids_to_delete.extend(existing_docs_for_path.get("ids", []))
             else:
-                existing_docs_for_source = vector_db.db.get(
-                    where={"source": base_file_name_for_cache_invalidation},
-                    include=["metadatas", "documents"],
-                )
-                if existing_docs_for_source and "ids" in existing_docs_for_source:
-                    ids_to_delete.extend(existing_docs_for_source["ids"])
+                if hasattr(vector_db.db, "get"):
+                    existing_docs_for_source = vector_db.db.get(
+                        where={"source": base_file_name_for_cache_invalidation},
+                        include=["metadatas", "documents"],
+                    )
+                    if existing_docs_for_source and isinstance(
+                        existing_docs_for_source, dict
+                    ):
+                        ids_to_delete.extend(existing_docs_for_source.get("ids", []))
 
             if ids_to_delete:
                 vector_db.delete_documents(ids_to_delete)
@@ -470,118 +584,137 @@ def update_document_in_chroma(
                     f"Удалены старые ChromaDB чанки для {os.path.basename(file_path)}."
                 )
         except Exception as e:
-            print(f"Ошибка при попытке удалить старые чанки для {file_path}: {e}")
+            raise RuntimeError(
+                f"Ошибка при удалении старых чанков для {file_path}: {e}"
+            )
 
+    # Create new document chunks
     new_chunks = text_splitter.create_documents(
         [full_text_content], metadatas=[metadata]
     )
-    if new_chunks:
-        texts = [chunk.page_content for chunk in new_chunks]
-        metadatas = [chunk.metadata for chunk in new_chunks]
-        ids = [str(uuid.uuid4()) for _ in new_chunks]
-
-        if not vector_db.db:
-            vector_db.load_or_create()
-
-        if vector_db.db and hasattr(vector_db.db, "add_texts"):
-            vector_db.db.add_texts(texts=texts, metadatas=metadatas, ids=ids)
-            new_chroma_ids.extend(ids)
-            print(f"Добавлено {len(new_chroma_ids)} новых чанков в ChromaDB.")
-        else:
-            print("Ошибка: не удалось инициализировать ChromaDB для добавления текстов")
-    else:
+    if not new_chunks:
         print(f"Нет записей для добавления для {os.path.basename(file_path)}.")
+        return new_chunks, new_chroma_ids
+
+    texts = [chunk.page_content for chunk in new_chunks]
+    metadatas = [chunk.metadata for chunk in new_chunks]
+    ids = [str(uuid.uuid4()) for _ in new_chunks]
+
+    # Ensure database is initialized
+    if not vector_db.db:
+        vector_db.load_or_create()
+
+    if not vector_db.db or not hasattr(vector_db.db, "add_texts"):
+        print("Ошибка: не удалось инициализировать ChromaDB для добавления текстов")
+        return new_chunks, new_chroma_ids
+
+    try:
+        vector_db.db.add_texts(texts=texts, metadatas=metadatas, ids=ids)
+        new_chroma_ids.extend(ids)
+        print(f"Добавлено {len(new_chroma_ids)} новых чанков в ChromaDB.")
+    except Exception as e:
+        raise RuntimeError(f"Ошибка при добавлении текстов в ChromaDB: {e}")
 
     return new_chunks, new_chroma_ids
 
 
 def process_catalog_data(file_path: str, vector_db: VectorDatabase) -> List[Document]:
+    """Processes catalog JSON file into documents and indexes them in ChromaDB.
+
+    Args:
+        file_path: Path to JSON catalog file
+        vector_db: VectorDatabase instance to use
+
+    Returns:
+        List of processed Document objects
+
+    Raises:
+        TypeError: If input parameters are invalid
+        RuntimeError: If processing fails
     """
-    Читает JSON-файл каталога, преобразует каждую запись в LangChain Document
-    и индексирует в ChromaDB. Реализовано точечное обновление.
-    """
-    documents_for_chroma = []
+    if not isinstance(file_path, str):
+        raise TypeError("file_path must be a string")
+    if not isinstance(vector_db, VectorDatabase):
+        raise TypeError("vector_db must be a VectorDatabase instance")
+
+    documents_for_chroma: List[Document] = []
     try:
-        # Читаем файл и вычисляем его хэш
+        # Get file metadata
         current_file_hash = get_file_hash(file_path)
         current_last_modified = os.path.getmtime(file_path)
         current_canonical_content = get_canonical_json_content(file_path)
         base_filename = os.path.basename(file_path)
 
-        # Проверяем, есть ли записи для этого файла в ChromaDB
+        # Check if file is unchanged
         file_unchanged = False
         existing_file_hash = None
         existing_last_modified = None
         existing_canonical_content = None
 
-        # Check if ChromaDB is properly initialized
+        # Validate ChromaDB state
         if not vector_db.db or not hasattr(vector_db.db, "_collection"):
             print("ChromaDB не инициализирована. Начинаем с чистого индекса.")
         else:
-            try:
-                if not hasattr(vector_db.db._collection, "count"):
-                    print("Коллекция ChromaDB не поддерживает операцию count")
-                elif vector_db.db._collection.count() > 0:
-                    if not hasattr(vector_db.db._collection, "get"):
+            collection = vector_db.db._collection
+            if not hasattr(collection, "count"):
+                print("Коллекция ChromaDB не поддерживает операцию count")
+            else:
+                count = collection.count() if hasattr(collection, "count") else 0
+                if count > 0:
+                    if not hasattr(collection, "get"):
                         print("Коллекция ChromaDB не поддерживает операцию get")
                     else:
-                        existing_docs = vector_db.db.get(
-                            where={"source": base_filename},
-                            include=["metadatas", "documents"],
-                        )
-                        if (
-                            existing_docs
-                            and isinstance(existing_docs, dict)
-                            and "metadatas" in existing_docs
-                            and isinstance(existing_docs["metadatas"], list)
-                            and len(existing_docs["metadatas"]) > 0
-                        ):
-                            # Берем метаданные первого документа для сравнения
-                            first_metadata = existing_docs["metadatas"][0]
-                            if isinstance(
-                                first_metadata, dict
-                            ):  # Проверяем, что метаданные не пустые
-                                existing_file_hash = first_metadata.get("file_hash")
-                                existing_last_modified = first_metadata.get(
-                                    "last_modified", 0
-                                )
-                                existing_canonical_content = first_metadata.get(
-                                    "canonical_content", ""
-                                )
-
-                                # Проверяем только содержимое и время модификации
-                                if (
-                                    existing_canonical_content
-                                    == current_canonical_content
-                                    and abs(
-                                        existing_last_modified - current_last_modified
+                        try:
+                            existing_docs = collection.get(
+                                where={"source": base_filename},
+                                include=["metadatas", "documents"],
+                            )
+                            if (
+                                existing_docs
+                                and isinstance(existing_docs, dict)
+                                and "metadatas" in existing_docs
+                                and isinstance(existing_docs["metadatas"], list)
+                                and len(existing_docs["metadatas"]) > 0
+                            ):
+                                first_metadata = existing_docs["metadatas"][0]
+                                if isinstance(first_metadata, dict):
+                                    existing_file_hash = first_metadata.get("file_hash")
+                                    existing_last_modified = first_metadata.get(
+                                        "last_modified", 0
                                     )
-                                    < 60.0
-                                ):
-                                    file_unchanged = True
-            except Exception as e:
-                print(f"Ошибка при проверке существующих документов: {e}")
+                                    existing_canonical_content = first_metadata.get(
+                                        "canonical_content", ""
+                                    )
 
-            # print(f"Текущий file_hash (полный): {current_file_hash}")
-            # print(
-            #     f"Сохранённый file_hash (полный): {first_metadata.get('file_hash_full', first_metadata.get('file_hash'))}"
-            # )
-            # print(f"Текущее last_modified: {current_last_modified}")
-            # print(f"Сохранённое last_modified: {existing_last_modified}")
-            # print(
-            #     f"Текущее canonical_content (первые 100 символов): {current_canonical_content[:100]}..."
-            # )
-            # if existing_canonical_content:
-            #     print(
-            #         f"Сохранённое canonical_content (первые 100 символов): {existing_canonical_content[:100]}..."
-            #     )
+                                    if (
+                                        existing_canonical_content
+                                        == current_canonical_content
+                                        and isinstance(
+                                            existing_last_modified, (int, float)
+                                        )
+                                        and isinstance(
+                                            current_last_modified, (int, float)
+                                        )
+                                        and abs(
+                                            existing_last_modified
+                                            - current_last_modified
+                                        )
+                                        < 60.0
+                                    ):
+                                        file_unchanged = True
+                        except Exception as e:
+                            raise RuntimeError(
+                                f"Ошибка при проверке существующих документов: {e}"
+                            )
 
         if file_unchanged:
             print(f"Документ не изменился: {base_filename}.")
             # Загружаем существующие документы
-            all_json_chunks = vector_db.db.get(
-                where={"source": base_filename}, include=["metadatas", "documents"]
-            )
+            all_json_chunks = None
+            if vector_db.db and hasattr(vector_db.db, "get"):
+                all_json_chunks = vector_db.db.get(
+                    where={"source": base_filename}, include=["metadatas", "documents"]
+                )
             if (
                 all_json_chunks
                 and isinstance(all_json_chunks.get("ids"), list)
@@ -617,7 +750,11 @@ def process_catalog_data(file_path: str, vector_db: VectorDatabase) -> List[Docu
         current_chroma_item_paths = set()
         processed_item_paths = set()
 
-        if vector_db.db._collection.count() > 0:
+        if (
+            vector_db.db
+            and hasattr(vector_db.db, "_collection")
+            and vector_db.db._collection.count() > 0
+        ):
             all_json_chunks = vector_db.db.get(
                 where={"source": base_filename}, include=["metadatas", "documents"]
             )
@@ -649,29 +786,48 @@ def process_catalog_data(file_path: str, vector_db: VectorDatabase) -> List[Docu
                 "canonical_content": current_canonical_content,
             }
 
-            try:
-                existing_chroma_docs = vector_db.db.get(
-                    where={"file_path": unique_item_path},
-                    include=["metadatas", "documents"],
-                )
-            except Exception as e:
-                print(
-                    f"Ошибка при получении данных из ChromaDB для {unique_item_path}: {e}"
-                )
-                existing_chroma_docs = {"ids": [], "metadatas": [], "documents": []}
+            existing_chroma_docs = {"ids": [], "metadatas": [], "documents": []}
+            if vector_db.db and hasattr(vector_db.db, "get"):
+                try:
+                    existing_chroma_docs = vector_db.db.get(
+                        where={"file_path": unique_item_path},
+                        include=["metadatas", "documents"],
+                    )
+                except Exception as e:
+                    print(
+                        f"Ошибка при получении данных из ChromaDB для {unique_item_path}: {e}"
+                    )
+                    existing_chroma_docs = {"ids": [], "metadatas": [], "documents": []}
 
             is_modified = True
             stored_doc_id = None
-            if existing_chroma_docs and existing_chroma_docs["ids"]:
+            if (
+                existing_chroma_docs
+                and isinstance(existing_chroma_docs, dict)
+                and "ids" in existing_chroma_docs
+                and isinstance(existing_chroma_docs["ids"], list)
+                and existing_chroma_docs["ids"]
+            ):
                 stored_doc_id = existing_chroma_docs["ids"][0]
-                if len(existing_chroma_docs["metadatas"]) > 0:
+                if (
+                    "metadatas" in existing_chroma_docs
+                    and isinstance(existing_chroma_docs["metadatas"], list)
+                    and existing_chroma_docs["metadatas"]
+                ):
                     stored_metadata = existing_chroma_docs["metadatas"][0]
-                    if stored_metadata:
+                    if (
+                        isinstance(stored_metadata, dict)
+                        and "file_hash" in stored_metadata
+                        and "last_modified" in metadata
+                        and isinstance(metadata["last_modified"], (int, float))
+                    ):
+                        stored_last_modified = stored_metadata.get("last_modified")
                         if (
-                            stored_metadata.get("file_hash") == metadata["file_hash"]
+                            stored_metadata["file_hash"] == metadata["file_hash"]
+                            and isinstance(stored_last_modified, (int, float))
                             and abs(
-                                stored_metadata.get("last_modified", 0)
-                                - metadata["last_modified"]
+                                float(stored_last_modified)
+                                - float(metadata["last_modified"])
                             )
                             < 60.0
                         ):
@@ -720,13 +876,15 @@ def process_catalog_data(file_path: str, vector_db: VectorDatabase) -> List[Docu
         ids_to_delete_from_json = []
         for doc_id in current_chroma_ids:
             try:
-                entry = vector_db.db.get(ids=[doc_id], include=["metadatas"])
+                entry = None
+                if vector_db.db and hasattr(vector_db.db, "get"):
+                    entry = vector_db.db.get(ids=[doc_id], include=["metadatas"])
                 if (
                     entry
                     and isinstance(entry["metadatas"], list)
                     and len(entry["metadatas"]) > 0
                     and isinstance(entry["metadatas"][0], dict)
-                    and "file_path" in entry["metadatas"][0]
+                    and "file_path" in entry["metадatas"][0]
                 ):
                     stored_item_path = entry["metadatas"][0]["file_path"]
                     if (
@@ -754,13 +912,29 @@ def process_catalog_data(file_path: str, vector_db: VectorDatabase) -> List[Docu
 
 
 def parse_files(directory: str, vector_db: VectorDatabase) -> List[Document]:
-    """
-    Парсит файлы из заданной директории, извлекает полный текст,
-    и затем индексирует в ChromaDB. Реализовано точечное обновление.
-    """
-    all_chunks = []
+    """Parses files from directory and indexes them in ChromaDB.
 
-    # Собираем список всех файлов в директории
+    Args:
+        directory: Directory path to parse files from
+        vector_db: VectorDatabase instance to use
+
+    Returns:
+        List of processed Document objects
+
+    Raises:
+        TypeError: If input parameters are invalid
+        RuntimeError: If parsing fails
+    """
+    if not isinstance(directory, str):
+        raise TypeError("directory must be a string")
+    if not isinstance(vector_db, VectorDatabase):
+        raise TypeError("vector_db must be a VectorDatabase instance")
+    if not os.path.isdir(directory):
+        raise ValueError(f"Directory does not exist: {directory}")
+
+    all_chunks: List[Document] = []
+
+    # Get list of files in directory
     existing_files_in_data_dir_full_path = {
         os.path.join(directory, f)
         for f in os.listdir(directory)
@@ -770,56 +944,132 @@ def parse_files(directory: str, vector_db: VectorDatabase) -> List[Document]:
     for filename in os.listdir(directory):
         file_path = os.path.join(directory, filename)
 
-        # Обработка JSON-файлов
+        # Process JSON files
         if filename.lower().endswith(".json"):
-            json_chunks = process_catalog_data(file_path, vector_db)
-            all_chunks.extend(json_chunks)
+            try:
+                json_chunks = process_catalog_data(file_path, vector_db)
+                all_chunks.extend(json_chunks)
+            except Exception as e:
+                print(f"Error processing JSON file {filename}: {e}")
             continue
 
-        # Обработка PDF, DOCX, TXT
+        # Process PDF, DOCX, TXT files
         if filename.lower().endswith((".pdf", ".docx", ".txt")):
             file_hash = get_file_hash(file_path)
             last_modified = os.path.getmtime(file_path)
 
             is_modified = True
-            stored_doc_id = None
+            stored_doc_id: Optional[str] = None
 
-            # Проверяем, есть ли уже проиндексированные данные
-            if vector_db.db._collection.count() > 0:
-                try:
-                    existing_chroma_docs = vector_db.db.get(
-                        where={"source": filename}, include=["metadatas", "documents"]
-                    )
-                except Exception as e:
-                    print(
-                        f"Ошибка при получении данных из ChromaDB для {filename}: {e}"
-                    )
-                    existing_chroma_docs = {"ids": [], "metadatas": [], "documents": []}
+            # Check if ChromaDB is initialized and has documents
+            if not vector_db.db or not hasattr(vector_db.db, "_collection"):
+                print("ChromaDB not initialized - processing as new file")
+            else:
+                collection = vector_db.db._collection
+                if not hasattr(collection, "count"):
+                    print("ChromaDB collection doesn't support count operation")
+                else:
+                    count = collection.count() if hasattr(collection, "count") else 0
+                    if count > 0:
+                        if not hasattr(vector_db.db, "get"):
+                            print("ChromaDB doesn't support get operation")
+                        else:
+                            try:
+                                existing_chroma_docs = vector_db.db.get(
+                                    where={"source": filename},
+                                    include=["metadatas", "documents"],
+                                )
+                                if (
+                                    existing_chroma_docs
+                                    and isinstance(existing_chroma_docs, dict)
+                                    and "ids" in existing_chroma_docs
+                                    and isinstance(existing_chroma_docs["ids"], list)
+                                    and existing_chroma_docs["ids"]
+                                ):
+                                    stored_doc_id = existing_chroma_docs["ids"][0]
+                                    if (
+                                        "metadatas" in existing_chroma_docs
+                                        and isinstance(
+                                            existing_chroma_docs["metadatas"], list
+                                        )
+                                        and existing_chroma_docs["metadatas"]
+                                    ):
+                                        stored_metadata = existing_chroma_docs[
+                                            "metadatas"
+                                        ][0]
+                                        if isinstance(stored_metadata, dict):
+                                            stored_hash = stored_metadata.get(
+                                                "file_hash"
+                                            )
+                                            stored_mtime = stored_metadata.get(
+                                                "last_modified"
+                                            )
 
-                # Если документ существует — проверяем изменение
-                if existing_chroma_docs and existing_chroma_docs["ids"]:
-                    stored_doc_id = existing_chroma_docs["ids"][0]
-                    if existing_chroma_docs["metadatas"]:
-                        stored_metadata = existing_chroma_docs["metadatas"][0]
-                        stored_hash = stored_metadata.get("file_hash")
-                        stored_mtime = stored_metadata.get("last_modified")
+                                            if (
+                                                isinstance(stored_hash, str)
+                                                and stored_hash == file_hash
+                                                and isinstance(
+                                                    stored_mtime, (int, float)
+                                                )
+                                                and abs(
+                                                    float(stored_mtime)
+                                                    - float(last_modified)
+                                                )
+                                                < 60.0
+                                            ):
+                                                is_modified = False
+                                                print(
+                                                    f"Document unchanged: {filename}."
+                                                )
 
-                        if (
-                            stored_hash == file_hash
-                            and stored_mtime
-                            and abs(stored_mtime - last_modified) < 60.0
-                        ):
-                            is_modified = False
-                            print(f"Документ не изменился: {filename}.")
-                            # Восстанавливаем чанки из базы
-                            for i, doc_id in enumerate(existing_chroma_docs["ids"]):
-                                chunk_content = existing_chroma_docs["documents"][i]
-                                chunk_metadata = existing_chroma_docs["metadatas"][i]
-                                all_chunks.append(
-                                    Document(
-                                        page_content=chunk_content,
-                                        metadata=chunk_metadata,
-                                    )
+                                                # Restore chunks from database
+                                                if (
+                                                    "documents" in existing_chroma_docs
+                                                    and isinstance(
+                                                        existing_chroma_docs[
+                                                            "documents"
+                                                        ],
+                                                        list,
+                                                    )
+                                                ):
+                                                    for i, doc_id in enumerate(
+                                                        existing_chroma_docs["ids"]
+                                                    ):
+                                                        if i < len(
+                                                            existing_chroma_docs[
+                                                                "documents"
+                                                            ]
+                                                        ) and i < len(
+                                                            existing_chroma_docs[
+                                                                "metadatas"
+                                                            ]
+                                                        ):
+                                                            chunk_content = (
+                                                                existing_chroma_docs[
+                                                                    "documents"
+                                                                ][i]
+                                                            )
+                                                            chunk_metadata = (
+                                                                existing_chroma_docs[
+                                                                    "metadatas"
+                                                                ][i]
+                                                            )
+                                                            if (
+                                                                chunk_content
+                                                                is not None
+                                                                and isinstance(
+                                                                    chunk_metadata, dict
+                                                                )
+                                                            ):
+                                                                all_chunks.append(
+                                                                    Document(
+                                                                        page_content=chunk_content,
+                                                                        metadata=chunk_metadata,
+                                                                    )
+                                                                )
+                            except Exception as e:
+                                print(
+                                    f"Error checking existing documents for {filename}: {e}"
                                 )
 
             # Обрабатываем только если файл был изменён
@@ -868,11 +1118,24 @@ def parse_files(directory: str, vector_db: VectorDatabase) -> List[Document]:
     return all_chunks
 
 
-def cleanup_deleted_files(vector_db: VectorDatabase, input_dir: str):
+def cleanup_deleted_files(vector_db: VectorDatabase, input_dir: str) -> None:
+    """Checks for deleted files and removes their entries from ChromaDB.
+
+    Args:
+        vector_db: VectorDatabase instance to check
+        input_dir: Directory to check for existing files
+
+    Raises:
+        TypeError: If input parameters are invalid
+        RuntimeError: If ChromaDB operations fail
     """
-    Проверяет соответствие документов в ChromaDB файлам в input_dir.
-    Удаляет записи из ChromaDB для файлов, которые больше не существуют.
-    """
+    if not isinstance(vector_db, VectorDatabase):
+        raise TypeError("vector_db must be a VectorDatabase instance")
+    if not isinstance(input_dir, str):
+        raise TypeError("input_dir must be a string")
+    if not os.path.isdir(input_dir):
+        raise ValueError(f"input_dir does not exist: {input_dir}")
+
     print("\n--- Проверка на удаленные файлы ---")
     existing_base_filenames_in_data_dir = set()
     for filename in os.listdir(input_dir):
@@ -881,62 +1144,88 @@ def cleanup_deleted_files(vector_db: VectorDatabase, input_dir: str):
 
     indexed_sources = set()
 
-    # Check if ChromaDB is properly initialized
-    if not vector_db.db or not hasattr(vector_db.db, "_collection"):
+    # Validate ChromaDB state
+    if not vector_db.db:
         print("Основной индекс ChromaDB не инициализирован. Пропускаем проверку.")
         print("--- Проверка на удаленные файлы завершена ---")
         return
 
     try:
-        # Get collection count safely
-        if not hasattr(vector_db.db._collection, "count"):
+        # Check collection exists and is accessible
+        if not hasattr(vector_db.db, "_collection"):
+            print("Коллекция ChromaDB не доступна.")
+            return
+
+        collection = vector_db.db._collection
+        if not hasattr(collection, "count"):
             print("Коллекция ChromaDB не поддерживает операцию count")
             return
 
-        if vector_db.db._collection.count() > 0:
-            if not hasattr(vector_db.db._collection, "get"):
-                print("Коллекция ChromaDB не поддерживает операцию get")
-                return
-
-            all_items_in_db = vector_db.db._collection.get(include=["metadatas"])
-            if (
-                all_items_in_db
-                and isinstance(all_items_in_db, dict)
-                and "metadatas" in all_items_in_db
-            ):
-                for metadata in all_items_in_db["metadatas"]:
-                    if not isinstance(metadata, dict):
-                        continue
-                    source = metadata.get("source")
-                    if source and isinstance(source, str):
-                        indexed_sources.add(source)
-        else:
+        # Get count safely
+        count = collection.count() if hasattr(collection, "count") else 0
+        if count == 0:
             print("Основной индекс ChromaDB пуст. Пропускаем проверку.")
+            print("--- Проверка на удаленные файлы завершена ---")
+            return
 
+        if not hasattr(collection, "get"):
+            print("Коллекция ChromaDB не поддерживает операцию get")
+            return
+
+        # Get all items with type checking
+        all_items_in_db = collection.get(include=["metadatas"])
+        if not all_items_in_db or not isinstance(all_items_in_db, dict):
+            print("Не удалось получить данные из ChromaDB.")
+            return
+
+        metadatas = all_items_in_db.get("metadatas", [])
+        if not isinstance(metadatas, list):
+            print("Неверный формат метаданных в ChromaDB.")
+            return
+
+        # Collect indexed sources
+        for metadata in metadatas:
+            if not isinstance(metadata, dict):
+                continue
+            source = metadata.get("source")
+            if source and isinstance(source, str):
+                indexed_sources.add(source)
+
+        # Process deleted files
         for indexed_source_name in indexed_sources:
             if indexed_source_name not in existing_base_filenames_in_data_dir:
                 print(f"Обнаружен удаленный файл: '{indexed_source_name}'")
 
-                # Get IDs to delete safely
                 if not hasattr(vector_db.db, "get"):
                     print("ChromaDB не поддерживает операцию get")
                     continue
 
+                # Get documents to delete
                 result = vector_db.db.get(where={"source": indexed_source_name})
-                if not result or not isinstance(result, dict) or "ids" not in result:
+                if not result or not isinstance(result, dict):
                     continue
 
-                ids_to_delete = result["ids"]
-                if ids_to_delete and isinstance(ids_to_delete, list):
-                    vector_db.delete_documents(ids_to_delete)
-                    print(
-                        f"Удалено {len(ids_to_delete)} записей из ChromaDB для '{indexed_source_name}'."
-                    )
+                ids_to_delete = result.get("ids", [])
+                if not isinstance(ids_to_delete, list):
+                    continue
 
-                vector_db.delete_cached_entries_by_source(indexed_source_name)
+                if ids_to_delete:
+                    try:
+                        vector_db.delete_documents(ids_to_delete)
+                        print(
+                            f"Удалено {len(ids_to_delete)} записей из ChromaDB для '{indexed_source_name}'."
+                        )
+                    except Exception as e:
+                        print(f"Ошибка при удалении документов: {e}")
+
+                # Clean cache entries
+                try:
+                    vector_db.delete_cached_entries_by_source(indexed_source_name)
+                except Exception as e:
+                    print(f"Ошибка при очистке кэша: {e}")
 
     except Exception as e:
-        print(f"Ошибка при проверке удаленных файлов: {e}")
+        raise RuntimeError(f"Ошибка при проверке удаленных файлов: {e}")
 
     print("--- Проверка на удаленные файлы завершена ---")
 
@@ -947,20 +1236,35 @@ class RAGSystem:
     Оркестрирует работу с хранилищем документов, векторной базой и LLM для ответа на вопросы.
     """
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config) -> None:
         """
         Инициализирует систему RAG.
+
         Args:
             config (Config): Объект конфигурации системы.
+
+        Raises:
+            ValueError: Если конфигурация невалидна
+            TypeError: Если параметры конфигурации неверных типов
         """
+        if not isinstance(config, Config):
+            raise TypeError("config must be a Config instance")
+        if not hasattr(config, "CHROMA_DB_PATH") or not hasattr(
+            config, "CHROMA_CACHE_PATH"
+        ):
+            raise ValueError("Invalid config - missing required paths")
+
         self.config = config
         self.vector_db = VectorDatabase(
             config.CHROMA_DB_PATH, config.CHROMA_CACHE_PATH, embeddings
         )
-        self.llm = llm
-        self.retriever: Any = None
-        self.qa_chain: Any = None
-        self.prompt: PromptTemplate = None
+        self.llm: ChatOpenAI = llm
+        self.retriever: Optional[Any] = None
+        self.qa_chain: Optional[LLMChain] = None
+        self.prompt: Optional[PromptTemplate] = None
+
+        # Initialize with empty prompt template as fallback
+        self.prompt = PromptTemplate.from_template("Вопрос: {input}\nОтвет: ")
 
     def initialize(self):
         """
@@ -1014,7 +1318,11 @@ class RAGSystem:
             ):
                 num_docs_in_chroma = self.vector_db.db._collection.count()
 
-            if num_docs_in_chroma > 0 and hasattr(self.vector_db.db, "as_retriever"):
+            if (
+                self.vector_db.db is not None
+                and num_docs_in_chroma > 0
+                and hasattr(self.vector_db.db, "as_retriever")
+            ):
                 self.retriever = self.vector_db.db.as_retriever(
                     search_type="similarity", search_kwargs={"k": 4}
                 )
@@ -1050,23 +1358,40 @@ class RAGSystem:
             self.retriever = None
 
     def query(self, question: str, use_cache: bool = True) -> str:
+        """Processes user query using RAG system and cache.
+
+        Args:
+            question: The question to answer
+            use_cache: Whether to use semantic cache
+
+        Returns:
+            str: The generated answer
+
+        Raises:
+            ValueError: If question is invalid
+            RuntimeError: If query processing fails
         """
-        Обрабатывает запрос пользователя, используя RAG-систему и кэш.
-        """
+        if not question or not isinstance(question, str):
+            raise ValueError("Question must be a non-empty string")
+
         print(f"\n--- Обработка запроса: {question} ---")
 
-        # Try cache first if enabled
+        # Тry cache first if enabled
         if use_cache and self.vector_db:
-            cached_answer = self.vector_db.get_cached_answer(question)
-            if cached_answer:
-                print("Ответ найден в кэше.")
-                return str(cached_answer)
-            print("Кэш не дал совпадений. Обращаюсь к модели...")
+            try:
+                cached_answer = self.vector_db.get_cached_answer(question)
+                if cached_answer:
+                    print("Ответ найден в кэше.")
+                    return str(cached_answer)
+                print("Кэш не дал совпадений. Обращаюсь к модели...")
+            except Exception as e:
+                print(f"Ошибка при проверке кэша: {e}")
 
         # Check if we have documents in ChromaDB
         num_docs_in_chroma = 0
         if (
-            self.vector_db.db
+            self.vector_db
+            and self.vector_db.db
             and hasattr(self.vector_db.db, "_collection")
             and hasattr(self.vector_db.db._collection, "count")
         ):
@@ -1075,17 +1400,28 @@ class RAGSystem:
         # Fallback to simple LLM if no documents or retriever
         if not self.retriever or num_docs_in_chroma == 0:
             print("Используется простая LLM-цепочка (нет документов для ретривера).")
-            result = self.llm.invoke(f"Вопрос: {question}\nОтвет: ")
-            answer = str(result.content if hasattr(result, "content") else str(result))
-            print("Ответ сгенерирован LLM без использования документов.")
-            if use_cache:
-                self.vector_db.add_to_cache(question, answer, sources=[])
-                print("Ответ добавлен в кэш.")
-            return answer
+            try:
+                result = self.llm.invoke(f"Вопрос: {question}\nОтвет: ")
+                answer = str(
+                    result.content if hasattr(result, "content") else str(result)
+                )
+                print("Ответ сгенерирован LLM без использования документов.")
+                if use_cache and self.vector_db:
+                    self.vector_db.add_to_cache(question, answer, sources=[])
+                    print("Ответ добавлен в кэш.")
+                return answer
+            except Exception as e:
+                raise RuntimeError(f"Ошибка при генерации ответа: {e}")
 
         # Use RAG with documents
         try:
+            if not self.qa_chain:
+                raise RuntimeError("QA chain not initialized")
+
             result = self.qa_chain.invoke({"input": question})
+            if not result or not isinstance(result, dict):
+                raise RuntimeError("Invalid QA chain response")
+
             answer = str(result.get("answer", "Не удалось сгенерировать ответ."))
             retrieved_sources = []
 
@@ -1097,7 +1433,8 @@ class RAGSystem:
                     if not hasattr(doc, "metadata") or not hasattr(doc, "page_content"):
                         continue
 
-                    source = doc.metadata.get("source", "N/A")
+                    metadata = doc.metadata if hasattr(doc, "metadata") else {}
+                    source = metadata.get("source", "N/A")
                     if ":" in source:
                         base_source = os.path.basename(source.split("#")[0])
                     else:
@@ -1107,14 +1444,14 @@ class RAGSystem:
                         retrieved_sources.append(base_source)
 
                     print(
-                        f"--- Документ {i+1} (Источник: {doc.metadata.get('source', 'N/A')}, "
-                        f"Item: {doc.metadata.get('item_name', 'N/A')}) ---"
+                        f"--- Документ {i+1} (Источник: {metadata.get('source', 'N/A')}, "
+                        f"Item: {metadata.get('item_name', 'N/A')}) ---"
                     )
                     print(f"Содержимое (часть): {doc.page_content[:500]}...")
                     print("---------------------------------------")
 
             print("Ответ сгенерирован LLM с использованием документов.")
-            if use_cache:
+            if use_cache and self.vector_db:
                 self.vector_db.add_to_cache(question, answer, sources=retrieved_sources)
                 print("Ответ добавлен в кэш.")
             return answer
@@ -1122,8 +1459,15 @@ class RAGSystem:
         except Exception as e:
             print(f"Ошибка при обработке запроса: {e}")
             # Fallback to simple LLM on error
-            result = self.llm.invoke(f"Вопрос: {question}\nОтвет: ")
-            return str(result.content if hasattr(result, "content") else str(result))
+            try:
+                result = self.llm.invoke(f"Вопрос: {question}\nОтвет: ")
+                return str(
+                    result.content if hasattr(result, "content") else str(result)
+                )
+            except Exception as fallback_error:
+                raise RuntimeError(
+                    f"Ошибка при генерации ответа: {fallback_error}"
+                ) from e
 
     def close(self):
         """Закрывает соединения с базой данных."""
@@ -1133,7 +1477,7 @@ class RAGSystem:
         print("Ссылки на базы данных ChromaDB очищены.")
 
 
-def clean_data(vector_db: VectorDatabase = None):
+def clean_data(vector_db: Optional[VectorDatabase] = None):
     """Очищает существующие индексы ChromaDB."""
     print("\n--- Очистка данных ---")
     print("Выполняется очистка старых индексов ChromaDB...")
@@ -1182,7 +1526,11 @@ def clear_semantic_cache(vector_db: VectorDatabase):
 
     try:
         # Очищаем все записи из кэша
-        if vector_db.cache_db._collection.count() > 0:
+        if (
+            vector_db.cache_db
+            and hasattr(vector_db.cache_db, "_collection")
+            and vector_db.cache_db._collection.count() > 0
+        ):
             all_ids = vector_db.cache_db._collection.get()["ids"]
             if all_ids:
                 vector_db.cache_db.delete(ids=all_ids)

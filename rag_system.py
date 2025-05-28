@@ -77,12 +77,13 @@ class VectorDatabase:
             collection_name="documents",
         )
 
-        if self.db._collection.count() > 0:
-            print(
-                f"Основная коллекция ChromaDB 'documents' загружена из {self.db_path}."
-            )
-        else:
-            print(f"Новая основная коллекция ChromaDB создана в {self.db_path}.")
+        if self.db and hasattr(self.db, "_collection"):
+            if self.db._collection.count() > 0:
+                print(
+                    f"Основная коллекция ChromaDB 'documents' загружена из {self.db_path}."
+                )
+            else:
+                print(f"Новая основная коллекция ChromaDB создана в {self.db_path}.")
 
     def load_or_create_cache(self, force_recreate: bool = False):
         """
@@ -102,39 +103,50 @@ class VectorDatabase:
             embedding_function=self.embeddings,
             collection_name="current",
         )
-        if self.cache_db._collection.count() > 0:
-            print(f"Переменная collection_name изменена на 'current'.")
-        else:
-            print(f"Переменная collection_name создана в {self.cache_path}.")
+        if self.cache_db and hasattr(self.cache_db, "_collection"):
+            if self.cache_db._collection.count() > 0:
+                print(f"Переменная collection_name изменена на 'current'.")
+            else:
+                print(f"Переменная collection_name создана в {self.cache_path}.")
 
     def add_to_cache(
         self, question: str, answer: str, sources: Optional[List[str]] = None
-    ):
+    ) -> bool:
         """
         Добавляет вопрос и соответствующий ответ в кэш ChromaDB.
+        Возвращает True если запись успешно добавлена, False в случае ошибки.
         """
-        if not self.cache_db:
-            self.load_or_create_cache()
-
-        # Очистка кэша перед добавлением новой записи
-        self.cleanup_expired_cache_entries(config.CACHE_TTL_DAYS)
-
-        doc_id = str(uuid.uuid4())
-        metadata = {
-            "answer": answer,
-            "timestamp": datetime.now().isoformat(),
-            "sources": json.dumps(sources if sources is not None else []),
-            "doc_id": doc_id,
-        }
         try:
-            self.cache_db.add_texts(
-                texts=[question],
-                metadatas=[metadata],
-                ids=[doc_id],
-            )
-            print(f"Добавлена запись в кэш с ID: {doc_id}")
+            if not self.cache_db:
+                self.load_or_create_cache()
+                if not self.cache_db or not hasattr(self.cache_db, "_collection"):
+                    print("Ошибка: не удалось инициализировать кэш")
+                    return False
+
+            # Очистка кэша перед добавлением новой записи
+            if self.cache_db and hasattr(self.cache_db, "_collection"):
+                self.cleanup_expired_cache_entries(config.CACHE_TTL_DAYS)
+
+            doc_id = str(uuid.uuid4())
+            metadata = {
+                "answer": answer,
+                "timestamp": datetime.now().isoformat(),
+                "sources": json.dumps(sources if sources is not None else []),
+                "doc_id": doc_id,
+            }
+
+            if self.cache_db:  # Дополнительная проверка
+                self.cache_db.add_texts(
+                    texts=[question],
+                    metadatas=[metadata],
+                    ids=[doc_id],
+                )
+                print(f"Добавлена запись в кэш с ID: {doc_id}")
+                return True
+            return False
         except Exception as e:
             print(f"Ошибка при добавлении записи в кэш ChromaDB: {e}")
+            return False
 
     def get_cached_answer(
         self,
@@ -144,30 +156,43 @@ class VectorDatabase:
         """
         Пытается найти кэшированный ответ на вопрос, если существует достаточно похожий запрос.
         """
-        if not self.cache_db:
-            self.load_or_create_cache()
-
-        if self.cache_db._collection.count() == 0:
-            return None  # Кэш пуст, не тратим время на поиск
-
         try:
+            if not self.cache_db:
+                self.load_or_create_cache()
+                if not self.cache_db or not hasattr(self.cache_db, "_collection"):
+                    return None
+
+            if not hasattr(self.cache_db, "_collection"):
+                return None
+
+            collection = self.cache_db._collection
+            if not hasattr(collection, "count"):
+                return None
+
+            if collection.count() == 0:
+                return None  # Кэш пуст
+
+            if not hasattr(self.cache_db, "similarity_search_with_score"):
+                return None
+
             results = self.cache_db.similarity_search_with_score(query=question, k=1)
+            if not results or len(results) == 0:
+                return None
+
+            doc, score = results[0]
+            if not hasattr(doc, "metadata"):
+                return None
+
+            if score <= similarity_threshold:
+                print(f"Кэш: Найдено совпадение с расстоянием L2 = {score:.4f}")
+                return str(doc.metadata.get("answer", ""))
+            else:
+                print(
+                    f"Кэш: Ближайшее совпадение с расстоянием L2 = {score:.4f} (выше порога {similarity_threshold})"
+                )
+                return None
         except Exception as e:
             print(f"Ошибка при поиске в кэше: {e}")
-            return None
-
-        if not results:
-            return None  # Нет результатов
-
-        doc, score = results[0]
-
-        if score <= similarity_threshold:
-            print(f"Кэш: Найдено совпадение с расстоянием L2 = {score:.4f}")
-            return doc.metadata["answer"]
-        else:
-            print(
-                f"Кэш: Ближайшее совпадение с расстоянием L2 = {score:.4f} (выше порога {similarity_threshold})"
-            )
             return None
 
     def delete_documents(self, doc_ids: List[str]):
@@ -188,44 +213,75 @@ class VectorDatabase:
             print("Нет ID для удаления из ChromaDB.")
 
     def delete_cached_entries_by_source(self, source_file_name: str):
-        if not self.cache_db:
-            print("Кэш ChromaDB не инициализирован.")
-            return
-
-        if self.cache_db._collection.count() == 0:
-            print("Кэш пуст.")
-            return
-
+        """Удаляет записи кэша, связанные с указанным источником."""
         try:
-            all_entries = self.cache_db._collection.get(include=["metadatas"])
+            if not self.cache_db:
+                print("Кэш ChromaDB не инициализирован.")
+                return
+
+            # Инициализируем кэш если нужно
+            if not hasattr(self.cache_db, "_collection"):
+                self.load_or_create_cache()
+                if not hasattr(self.cache_db, "_collection"):
+                    print("Не удалось инициализировать коллекцию кэша.")
+                    return
+
+            collection = self.cache_db._collection
+            if not hasattr(collection, "count"):
+                print("Коллекция кэша не поддерживает операцию count")
+                return
+
+            if collection.count() == 0:
+                print("Кэш пуст.")
+                return
+
+            if not hasattr(collection, "get"):
+                print("Коллекция кэша не поддерживает операцию get")
+                return
+
+            all_entries = collection.get(include=["metadatas"])
+            if not all_entries or not isinstance(all_entries, dict):
+                print("Не удалось получить записи кэша.")
+                return
+
+            ids_to_delete = []
+            ids = all_entries.get("ids", [])
+            metadatas = all_entries.get("metadatas", [])
+
+            for i, doc_id in enumerate(ids):
+                if i >= len(metadatas):
+                    continue
+
+                metadata = metadatas[i]
+                if not isinstance(metadata, dict):
+                    continue
+
+                sources_str = metadata.get("sources")
+                if not isinstance(sources_str, str):
+                    continue
+
+                try:
+                    sources = json.loads(sources_str)
+                    if isinstance(sources, list) and source_file_name in sources:
+                        ids_to_delete.append(doc_id)
+                except json.JSONDecodeError as e:
+                    print(f"Ошибка десериализации 'sources' для {doc_id}: {e}")
+
+            if ids_to_delete:
+                try:
+                    if hasattr(self.cache_db, "delete"):
+                        self.cache_db.delete(ids=ids_to_delete)
+                        print(
+                            f"Удалено {len(ids_to_delete)} записей, связанных с '{source_file_name}'."
+                        )
+                    else:
+                        print("Коллекция кэша не поддерживает операцию delete")
+                except Exception as e:
+                    print(f"Ошибка при удалении записей: {e}")
+            else:
+                print(f"Не найдено записей, связанных с '{source_file_name}'.")
         except Exception as e:
-            print(f"Ошибка при получении записей из кэша: {e}")
-            return
-
-        ids_to_delete = []
-
-        if "ids" in all_entries and "metadatas" in all_entries:
-            for i, doc_id in enumerate(all_entries["ids"]):
-                if i < len(all_entries["metadatas"]):
-                    metadata = all_entries["metadatas"][i]
-                    if metadata and metadata.get("sources"):
-                        try:
-                            sources = json.loads(metadata["sources"])
-                            if source_file_name in sources:
-                                ids_to_delete.append(doc_id)
-                        except json.JSONDecodeError as e:
-                            print(f"Ошибка десериализации 'sources' для {doc_id}: {e}")
-
-        if ids_to_delete:
-            try:
-                self.cache_db.delete(ids=ids_to_delete)
-                print(
-                    f"Удалено {len(ids_to_delete)} записей, связанных с '{source_file_name}'."
-                )
-            except Exception as e:
-                print(f"Ошибка при удалении записей: {e}")
-        else:
-            print(f"Не найдено записей, связанных с '{source_file_name}'.")
+            print(f"Ошибка при обработке кэша: {e}")
 
     def cleanup_expired_cache_entries(self, ttl_days: float):
         """
@@ -235,44 +291,73 @@ class VectorDatabase:
             print("Кэш ChromaDB не инициализирован. Пропускаем очистку.")
             return
 
-        print(
-            f"--- Очистка семантического кэша (записи старше {ttl_days:.8f} дней) ---"
-        )
+        try:
+            if not hasattr(self.cache_db, "_collection"):
+                print("Коллекция кэша не доступна.")
+                return
 
-        if self.cache_db._collection.count() == 0:
-            print("Кэш пуст, нет просроченных записей для очистки.")
-            print("--- Очистка кэша завершена ---")
-            return
+            collection = self.cache_db._collection
+            if not hasattr(collection, "count"):
+                print("Коллекция кэша не поддерживает операцию count")
+                return
 
-        current_time = datetime.now()
-        expiration_threshold = current_time - timedelta(days=ttl_days)
-        ids_to_delete = []
-        all_entries = self.cache_db._collection.get(include=["metadatas"])
+            if collection.count() == 0:
+                print("Кэш пуст, нет просроченных записей для очистки.")
+                print("--- Очистка кэша завершена ---")
+                return
 
-        if all_entries and "ids" in all_entries:
-            for i, doc_id in enumerate(all_entries["ids"]):
-                metadata = all_entries["metadatas"][i]
-                if metadata and metadata.get("timestamp"):
-                    try:
-                        cache_timestamp_str = metadata["timestamp"]
-                        cache_datetime = datetime.fromisoformat(cache_timestamp_str)
-                        if cache_datetime < expiration_threshold:
-                            ids_to_delete.append(doc_id)
-                    except ValueError as e:
+            current_time = datetime.now()
+            expiration_threshold = current_time - timedelta(days=ttl_days)
+            ids_to_delete = []
+
+            if not hasattr(collection, "get"):
+                print("Коллекция кэша не поддерживает операцию get")
+                return
+
+            all_entries = collection.get(include=["metadatas"])
+            if not all_entries or not isinstance(all_entries, dict):
+                print("Не удалось получить записи кэша для очистки.")
+                return
+
+            ids = all_entries.get("ids", [])
+            metadatas = all_entries.get("metadatas", [])
+
+            for i, doc_id in enumerate(ids):
+                if i >= len(metadatas):
+                    continue
+                metadata = metadatas[i]
+                if not isinstance(metadata, dict):
+                    continue
+
+                timestamp_str = metadata.get("timestamp")
+                if not isinstance(timestamp_str, str):
+                    continue
+
+                try:
+                    cache_datetime = datetime.fromisoformat(timestamp_str)
+                    if cache_datetime < expiration_threshold:
+                        ids_to_delete.append(doc_id)
+                except ValueError as e:
+                    print(
+                        f"Предупреждение: Неверный формат timestamp в кэше для {doc_id}: {timestamp_str}. Ошибка: {e}"
+                    )
+
+            if ids_to_delete:
+                try:
+                    if hasattr(self.cache_db, "delete"):
+                        self.cache_db.delete(ids=ids_to_delete)
                         print(
-                            f"Предупреждение: Неверный формат timestamp в кэше для {doc_id}: {cache_timestamp_str}. Ошибка: {e}"
+                            f"Удалено {len(ids_to_delete)} просроченных записей из семантического кэша."
                         )
+                    else:
+                        print("Коллекция кэша не поддерживает операцию delete")
+                except Exception as e:
+                    print(f"Ошибка при удалении просроченных записей из кэша: {e}")
+            else:
+                print("Не найдено просроченных записей в семантическом кэше.")
+        except Exception as e:
+            print(f"Ошибка при обработке кэша: {e}")
 
-        if ids_to_delete:
-            try:
-                self.cache_db.delete(ids=ids_to_delete)
-                print(
-                    f"Удалено {len(ids_to_delete)} просроченных записей из семантического кэша."
-                )
-            except Exception as e:
-                print(f"Ошибка при удалении просроченных записей из кэша: {e}")
-        else:
-            print("Не найдено просроченных записей в семантическом кэше.")
         print("--- Очистка кэша завершена ---")
 
 
@@ -326,27 +411,29 @@ def update_document_in_chroma(
     current_file_hash: str,
     current_last_modified: float,
     stored_doc_id: Optional[str] = None,
-) -> List[Document]:
+) -> tuple[List[Document], List[str]]:
     """
     Обновляет документ в ChromaDB: удаляет старые чанки и добавляет новые.
     """
     base_file_name_for_cache_invalidation = os.path.basename(file_path.split("#")[0])
+    new_chunks: List[Document] = []
+    new_chroma_ids: List[str] = []
 
-    if stored_doc_id:
+    if stored_doc_id and vector_db.db and hasattr(vector_db.db, "_collection"):
         try:
             ids_to_delete = []
             if "#" in file_path:
                 existing_docs_for_path = vector_db.db.get(
                     where={"file_path": file_path}, include=["metadatas", "documents"]
                 )
-                if existing_docs_for_path:
+                if existing_docs_for_path and "ids" in existing_docs_for_path:
                     ids_to_delete.extend(existing_docs_for_path["ids"])
             else:
                 existing_docs_for_source = vector_db.db.get(
                     where={"source": base_file_name_for_cache_invalidation},
                     include=["metadatas", "documents"],
                 )
-                if existing_docs_for_source:
+                if existing_docs_for_source and "ids" in existing_docs_for_source:
                     ids_to_delete.extend(existing_docs_for_source["ids"])
 
             if ids_to_delete:
@@ -356,12 +443,10 @@ def update_document_in_chroma(
                 )
         except Exception as e:
             print(f"Ошибка при попытке удалить старые чанки для {file_path}: {e}")
-            pass
 
     new_chunks = text_splitter.create_documents(
         [full_text_content], metadatas=[metadata]
     )
-    new_chroma_ids = []
     if new_chunks:
         texts = [chunk.page_content for chunk in new_chunks]
         metadatas = [chunk.metadata for chunk in new_chunks]
@@ -370,9 +455,12 @@ def update_document_in_chroma(
         if not vector_db.db:
             vector_db.load_or_create()
 
-        vector_db.db.add_texts(texts=texts, metadatas=metadatas, ids=ids)
-        new_chroma_ids.extend(ids)
-        print(f"Добавлено {len(new_chroma_ids)} новых чанков в ChromaDB.")
+        if vector_db.db and hasattr(vector_db.db, "add_texts"):
+            vector_db.db.add_texts(texts=texts, metadatas=metadatas, ids=ids)
+            new_chroma_ids.extend(ids)
+            print(f"Добавлено {len(new_chroma_ids)} новых чанков в ChromaDB.")
+        else:
+            print("Ошибка: не удалось инициализировать ChromaDB для добавления текстов")
     else:
         print(f"Нет записей для добавления для {os.path.basename(file_path)}.")
 
@@ -398,44 +486,67 @@ def process_catalog_data(file_path: str, vector_db: VectorDatabase) -> List[Docu
         existing_last_modified = None
         existing_canonical_content = None
 
-        if vector_db.db._collection.count() > 0:
-            existing_docs = vector_db.db.get(
-                where={"source": base_filename}, include=["metadatas", "documents"]
-            )
-            if (
-                existing_docs
-                and "metadatas" in existing_docs
-                and existing_docs["metadatas"]
-            ):
-                # Берем метаданные первого документа для сравнения
-                first_metadata = existing_docs["metadatas"][0]
-                if first_metadata:  # Проверяем, что метаданные не пустые
-                    existing_file_hash = first_metadata.get("file_hash")
-                    existing_last_modified = first_metadata.get("last_modified", 0)
-                    existing_canonical_content = first_metadata.get(
-                        "canonical_content", ""
-                    )
+        # Check if ChromaDB is properly initialized
+        if not vector_db.db or not hasattr(vector_db.db, "_collection"):
+            print("ChromaDB не инициализирована. Начинаем с чистого индекса.")
+        else:
+            try:
+                if not hasattr(vector_db.db._collection, "count"):
+                    print("Коллекция ChromaDB не поддерживает операцию count")
+                elif vector_db.db._collection.count() > 0:
+                    if not hasattr(vector_db.db._collection, "get"):
+                        print("Коллекция ChromaDB не поддерживает операцию get")
+                    else:
+                        existing_docs = vector_db.db.get(
+                            where={"source": base_filename},
+                            include=["metadatas", "documents"],
+                        )
+                        if (
+                            existing_docs
+                            and isinstance(existing_docs, dict)
+                            and "metadatas" in existing_docs
+                            and isinstance(existing_docs["metadatas"], list)
+                            and len(existing_docs["metadatas"]) > 0
+                        ):
+                            # Берем метаданные первого документа для сравнения
+                            first_metadata = existing_docs["metadatas"][0]
+                            if isinstance(
+                                first_metadata, dict
+                            ):  # Проверяем, что метаданные не пустые
+                                existing_file_hash = first_metadata.get("file_hash")
+                                existing_last_modified = first_metadata.get(
+                                    "last_modified", 0
+                                )
+                                existing_canonical_content = first_metadata.get(
+                                    "canonical_content", ""
+                                )
 
-                    # Проверяем только содержимое и время модификации
-                    if (
-                        existing_canonical_content == current_canonical_content
-                        and abs(existing_last_modified - current_last_modified) < 60.0
-                    ):
-                        file_unchanged = True
+                                # Проверяем только содержимое и время модификации
+                                if (
+                                    existing_canonical_content
+                                    == current_canonical_content
+                                    and abs(
+                                        existing_last_modified - current_last_modified
+                                    )
+                                    < 60.0
+                                ):
+                                    file_unchanged = True
+            except Exception as e:
+                print(f"Ошибка при проверке существующих документов: {e}")
 
-                # print(f"Текущий file_hash (полный): {current_file_hash}")
-                # print(
-                #     f"Сохранённый file_hash (полный): {first_metadata.get('file_hash_full', first_metadata.get('file_hash'))}"
-                # )
-                # print(f"Текущее last_modified: {current_last_modified}")
-                # print(f"Сохранённое last_modified: {existing_last_modified}")
-                # print(
-                #     f"Текущее canonical_content (первые 100 символов): {current_canonical_content[:100]}..."
-                # )
-                # if existing_canonical_content:
-                #     print(
-                #         f"Сохранённое canonical_content (первые 100 символов): {existing_canonical_content[:100]}..."
-                #     )
+            # print(f"Текущий file_hash (полный): {current_file_hash}")
+            # print(
+            #     f"Сохранённый file_hash (полный): {first_metadata.get('file_hash_full', first_metadata.get('file_hash'))}"
+            # )
+            # print(f"Текущее last_modified: {current_last_modified}")
+            # print(f"Сохранённое last_modified: {existing_last_modified}")
+            # print(
+            #     f"Текущее canonical_content (первые 100 символов): {current_canonical_content[:100]}..."
+            # )
+            # if existing_canonical_content:
+            #     print(
+            #         f"Сохранённое canonical_content (первые 100 символов): {existing_canonical_content[:100]}..."
+            #     )
 
         if file_unchanged:
             print(f"Документ не изменился: {base_filename}.")
@@ -741,28 +852,63 @@ def cleanup_deleted_files(vector_db: VectorDatabase, input_dir: str):
             existing_base_filenames_in_data_dir.add(filename)
 
     indexed_sources = set()
-    if vector_db.db._collection.count() > 0:
-        all_items_in_db = vector_db.db._collection.get(include=["metadatas"])
-        if all_items_in_db and "metadatas" in all_items_in_db:
-            for metadata in all_items_in_db["metadatas"]:
-                source = metadata.get("source")
-                if source:
-                    indexed_sources.add(source)
-    else:
-        print("Основной индекс ChromaDB пуст. Пропускаем проверку.")
 
-    for indexed_source_name in indexed_sources:
-        if indexed_source_name not in existing_base_filenames_in_data_dir:
-            print(f"Обнаружен удаленный файл: '{indexed_source_name}'")
-            ids_to_delete = vector_db.db.get(where={"source": indexed_source_name})[
-                "ids"
-            ]
-            if ids_to_delete:
-                vector_db.delete_documents(ids_to_delete)
-                print(
-                    f"Удалено {len(ids_to_delete)} записей из ChromaDB для '{indexed_source_name}'."
-                )
-            vector_db.delete_cached_entries_by_source(indexed_source_name)
+    # Check if ChromaDB is properly initialized
+    if not vector_db.db or not hasattr(vector_db.db, "_collection"):
+        print("Основной индекс ChromaDB не инициализирован. Пропускаем проверку.")
+        print("--- Проверка на удаленные файлы завершена ---")
+        return
+
+    try:
+        # Get collection count safely
+        if not hasattr(vector_db.db._collection, "count"):
+            print("Коллекция ChromaDB не поддерживает операцию count")
+            return
+
+        if vector_db.db._collection.count() > 0:
+            if not hasattr(vector_db.db._collection, "get"):
+                print("Коллекция ChromaDB не поддерживает операцию get")
+                return
+
+            all_items_in_db = vector_db.db._collection.get(include=["metadatas"])
+            if (
+                all_items_in_db
+                and isinstance(all_items_in_db, dict)
+                and "metadatas" in all_items_in_db
+            ):
+                for metadata in all_items_in_db["metadatas"]:
+                    if not isinstance(metadata, dict):
+                        continue
+                    source = metadata.get("source")
+                    if source and isinstance(source, str):
+                        indexed_sources.add(source)
+        else:
+            print("Основной индекс ChromaDB пуст. Пропускаем проверку.")
+
+        for indexed_source_name in indexed_sources:
+            if indexed_source_name not in existing_base_filenames_in_data_dir:
+                print(f"Обнаружен удаленный файл: '{indexed_source_name}'")
+
+                # Get IDs to delete safely
+                if not hasattr(vector_db.db, "get"):
+                    print("ChromaDB не поддерживает операцию get")
+                    continue
+
+                result = vector_db.db.get(where={"source": indexed_source_name})
+                if not result or not isinstance(result, dict) or "ids" not in result:
+                    continue
+
+                ids_to_delete = result["ids"]
+                if ids_to_delete and isinstance(ids_to_delete, list):
+                    vector_db.delete_documents(ids_to_delete)
+                    print(
+                        f"Удалено {len(ids_to_delete)} записей из ChromaDB для '{indexed_source_name}'."
+                    )
+
+                vector_db.delete_cached_entries_by_source(indexed_source_name)
+
+    except Exception as e:
+        print(f"Ошибка при проверке удаленных файлов: {e}")
 
     print("--- Проверка на удаленные файлы завершена ---")
 
@@ -797,7 +943,11 @@ class RAGSystem:
         self.vector_db.load_or_create_cache()
         cleanup_deleted_files(self.vector_db, self.config.INPUT_DIR)
         documents = parse_files(self.config.INPUT_DIR, self.vector_db)
-        num_docs_in_chroma = self.vector_db.db._collection.count()
+
+        num_docs_in_chroma = 0
+        if self.vector_db.db and hasattr(self.vector_db.db, "_collection"):
+            num_docs_in_chroma = self.vector_db.db._collection.count()
+
         if num_docs_in_chroma == 0:
             print(
                 "ВНИМАНИЕ: ChromaDB индекс пуст. RAG система может работать неоптимально."
@@ -811,35 +961,58 @@ class RAGSystem:
 
     def _init_chains(self):
         """Инициализирует промпт и цепочки LangChain для RAG."""
-        prompt_template = """
-        Ты — умный ассистент, специализирующийся на ювелирных украшениях.
-        Ваши основные задачи:
-        1. Отвечать на вопросы о ювелирных украшениях, их характеристиках, использовании и ценах по следующему контексту: {context}
-        2. Помогать клиентам в выборе подходящих товаров.
-        Ваша цель — предоставлять полезные, понятные и дружелюбные ответы.
-        Если вы не знаешь ответа, просто скажи: «Я не знаю». Не придумывай информацию.
-        При предложении товаров старайся быть конкретным и описывать, как товар может помочь.
-        Если для ответа требуется больше информации, задавай уточняющие вопросы.
-        Вопрос: {input}
-        """
-        self.prompt = PromptTemplate(
-            input_variables=["context", "input"],
-            template=prompt_template,
-        )
-        num_docs_in_chroma = self.vector_db.db._collection.count()
-        if self.vector_db.db and num_docs_in_chroma > 0:
-            self.retriever = self.vector_db.db.as_retriever(
-                search_type="similarity", search_kwargs={"k": 4}
+        try:
+            prompt_template = """
+            Ты — умный ассистент, специализирующийся на ювелирных украшениях.
+            Ваши основные задачи:
+            1. Отвечать на вопросы о ювелирных украшениях, их характеристиках, использовании и ценах по следующему контексту: {context}
+            2. Помогать клиентам в выборе подходящих товаров.
+            Ваша цель — предоставлять полезные, понятные и дружелюбные ответы.
+            Если вы не знаешь ответа, просто скажи: «Я не знаешь». Не придумывай информацию.
+            При предложении товаров старайся быть конкретным и описывать, как товар может помочь.
+            Если для ответа требуется больше информации, задавай уточняющие вопросы.
+            Вопрос: {input}
+            """
+            self.prompt = PromptTemplate(
+                input_variables=["context", "input"],
+                template=prompt_template,
             )
-            from langchain.chains import create_retrieval_chain
-            from langchain.chains.combine_documents import create_stuff_documents_chain
 
-            combine_docs_chain = create_stuff_documents_chain(self.llm, self.prompt)
-            self.qa_chain = create_retrieval_chain(self.retriever, combine_docs_chain)
-        else:
-            print(
-                "ВНИМАНИЕ: Основной ChromaDB индекс пуст. Невозможно инициализировать RetrievalQA. Будет использоваться простая LLM-цепочка."
-            )
+            num_docs_in_chroma = 0
+            if (
+                self.vector_db.db
+                and hasattr(self.vector_db.db, "_collection")
+                and hasattr(self.vector_db.db._collection, "count")
+            ):
+                num_docs_in_chroma = self.vector_db.db._collection.count()
+
+            if num_docs_in_chroma > 0 and hasattr(self.vector_db.db, "as_retriever"):
+                self.retriever = self.vector_db.db.as_retriever(
+                    search_type="similarity", search_kwargs={"k": 4}
+                )
+                from langchain.chains import create_retrieval_chain
+                from langchain.chains.combine_documents import (
+                    create_stuff_documents_chain,
+                )
+
+                combine_docs_chain = create_stuff_documents_chain(self.llm, self.prompt)
+                self.qa_chain = create_retrieval_chain(
+                    self.retriever, combine_docs_chain
+                )
+            else:
+                print(
+                    "ВНИМАНИЕ: Основной ChromaDB индекс пуст или недоступен. Будет использоваться простая LLM-цепочка."
+                )
+                self.qa_chain = LLMChain(
+                    llm=self.llm,
+                    prompt=PromptTemplate(
+                        input_variables=["input"], template="Вопрос: {input}\nОтвет: "
+                    ),
+                )
+                self.retriever = None
+        except Exception as e:
+            print(f"Ошибка при инициализации цепочек: {e}")
+            # Fallback to simple LLM chain
             self.qa_chain = LLMChain(
                 llm=self.llm,
                 prompt=PromptTemplate(
@@ -853,49 +1026,76 @@ class RAGSystem:
         Обрабатывает запрос пользователя, используя RAG-систему и кэш.
         """
         print(f"\n--- Обработка запроса: {question} ---")
+
+        # Try cache first if enabled
         if use_cache:
             cached_answer = self.vector_db.get_cached_answer(question)
             if cached_answer:
                 print("Ответ найден в кэше.")
-                return cached_answer
-            else:
-                print("Кэш не дал совпадений. Обращаюсь к модели...")
+                return str(cached_answer)
+            print("Кэш не дал совпадений. Обращаюсь к модели...")
 
-        num_docs_in_chroma = self.vector_db.db._collection.count()
-        if self.retriever is None or num_docs_in_chroma == 0:
+        # Check if we have documents in ChromaDB
+        num_docs_in_chroma = 0
+        if (
+            self.vector_db.db
+            and hasattr(self.vector_db.db, "_collection")
+            and hasattr(self.vector_db.db._collection, "count")
+        ):
+            num_docs_in_chroma = self.vector_db.db._collection.count()
+
+        # Fallback to simple LLM if no documents or retriever
+        if not self.retriever or num_docs_in_chroma == 0:
             print("Используется простая LLM-цепочка (нет документов для ретривера).")
             result = self.llm.invoke(f"Вопрос: {question}\nОтвет: ")
-            answer = result.content if hasattr(result, "content") else str(result)
+            answer = str(result.content if hasattr(result, "content") else str(result))
             print("Ответ сгенерирован LLM без использования документов.")
             if use_cache:
-                print(self.vector_db.add_to_cache(question, answer, sources=[]))
+                self.vector_db.add_to_cache(question, answer, sources=[])
                 print("Ответ добавлен в кэш.")
             return answer
 
-        result = self.qa_chain.invoke({"input": question})
-        answer = result.get("answer", "Не удалось сгенерировать ответ.")
-        retrieved_sources = []
-        if "context" in result:
-            retrieved_docs = result["context"]
-            print(f"Найдено {len(retrieved_docs)} релевантных документов.")
-            for i, doc in enumerate(retrieved_docs):
-                source = doc.metadata.get("source", "N/A")
-                if ":" in source:
-                    base_source = os.path.basename(source.split("#")[0])
-                else:
-                    base_source = os.path.basename(source)
-                if base_source not in retrieved_sources:
-                    retrieved_sources.append(base_source)
-                print(
-                    f"--- Документ {i+1} (Источник: {doc.metadata.get('source', 'N/A')}, Item: {doc.metadata.get('item_name', 'N/A')}) ---"
-                )
-                print(f"Содержимое (часть): {doc.page_content[:500]}...")
-                print("---------------------------------------")
-        print("Ответ сгенерирован LLM с использованием документов.")
-        if use_cache:
-            self.vector_db.add_to_cache(question, answer, sources=retrieved_sources)
-            print("Ответ добавлен в кэш.")
-        return answer
+        # Use RAG with documents
+        try:
+            result = self.qa_chain.invoke({"input": question})
+            answer = str(result.get("answer", "Не удалось сгенерировать ответ."))
+            retrieved_sources = []
+
+            if "context" in result and isinstance(result["context"], list):
+                retrieved_docs = result["context"]
+                print(f"Найдено {len(retrieved_docs)} релевантных документов.")
+
+                for i, doc in enumerate(retrieved_docs):
+                    if not hasattr(doc, "metadata") or not hasattr(doc, "page_content"):
+                        continue
+
+                    source = doc.metadata.get("source", "N/A")
+                    if ":" in source:
+                        base_source = os.path.basename(source.split("#")[0])
+                    else:
+                        base_source = os.path.basename(source)
+
+                    if base_source not in retrieved_sources:
+                        retrieved_sources.append(base_source)
+
+                    print(
+                        f"--- Документ {i+1} (Источник: {doc.metadata.get('source', 'N/A')}, "
+                        f"Item: {doc.metadata.get('item_name', 'N/A')}) ---"
+                    )
+                    print(f"Содержимое (часть): {doc.page_content[:500]}...")
+                    print("---------------------------------------")
+
+            print("Ответ сгенерирован LLM с использованием документов.")
+            if use_cache:
+                self.vector_db.add_to_cache(question, answer, sources=retrieved_sources)
+                print("Ответ добавлен в кэш.")
+            return answer
+
+        except Exception as e:
+            print(f"Ошибка при обработке запроса: {e}")
+            # Fallback to simple LLM on error
+            result = self.llm.invoke(f"Вопрос: {question}\nОтвет: ")
+            return str(result.content if hasattr(result, "content") else str(result))
 
     def close(self):
         """Закрывает соединения с базой данных."""

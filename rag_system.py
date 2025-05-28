@@ -21,7 +21,11 @@ from config import Config, config
 
 # Инициализация эмбеддингов и LLM на основе конфигурации
 embeddings = HuggingFaceEmbeddings(model_name=config.EMBEDDING_MODEL)
-llm = ChatOpenAI(model=config.LLM_MODEL, temperature=config.LLM_TEMPERATURE)
+
+llm = ChatOpenAI(
+    model=config.LLM_MODEL,
+    temperature=config.LLM_TEMPERATURE,
+)
 
 # Инициализация Text Splitter один раз (ГЛОБАЛЬНО)
 text_splitter = RecursiveCharacterTextSplitter(
@@ -40,7 +44,7 @@ class VectorDatabase:
 
     def __init__(
         self, db_path: str, cache_path: str, embeddings: HuggingFaceEmbeddings
-    ):
+    ) -> None:
         """
         Инициализирует пути к базам данных ChromaDB и модель эмбеддингов.
         Args:
@@ -56,7 +60,7 @@ class VectorDatabase:
         self.cache_db: Optional[Chroma] = None
         """Коллекция кэша ChromaDB для кэшированных вопросов и ответов."""
 
-    def load_or_create(self, force_recreate: bool = False):
+    def load_or_create(self, force_recreate: bool = False) -> None:
         """
         Загружает или создает основную коллекцию ChromaDB.
         """
@@ -85,7 +89,7 @@ class VectorDatabase:
             else:
                 print(f"Новая основная коллекция ChromaDB создана в {self.db_path}.")
 
-    def load_or_create_cache(self, force_recreate: bool = False):
+    def load_or_create_cache(self, force_recreate: bool = False) -> None:
         """
         Загружает или создает коллекцию кэша ChromaDB.
         """
@@ -112,6 +116,16 @@ class VectorDatabase:
     def add_to_cache(
         self, question: str, answer: str, sources: Optional[List[str]] = None
     ) -> bool:
+        """Adds question-answer pair to semantic cache.
+
+        Args:
+            question: The question text to cache
+            answer: The answer text to cache
+            sources: Optional list of source document names
+
+        Returns:
+            bool: True if successfully added, False on error
+        """
         """
         Добавляет вопрос и соответствующий ответ в кэш ChromaDB.
         Возвращает True если запись успешно добавлена, False в случае ошибки.
@@ -153,6 +167,15 @@ class VectorDatabase:
         question: str,
         similarity_threshold: float = 0.1,
     ) -> Optional[str]:
+        """Searches for cached answer to similar question.
+
+        Args:
+            question: The question to search for
+            similarity_threshold: Max L2 distance for match (0-1)
+
+        Returns:
+            Optional[str]: Cached answer if found, else None
+        """
         """
         Пытается найти кэшированный ответ на вопрос, если существует достаточно похожий запрос.
         """
@@ -195,17 +218,20 @@ class VectorDatabase:
             print(f"Ошибка при поиске в кэше: {e}")
             return None
 
-    def delete_documents(self, doc_ids: List[str]):
+    def delete_documents(self, doc_ids: List[str]) -> None:
         """
         Удаляет документы из ChromaDB по их внутренним ID.
         """
-        if not self.db:
-            print("ChromaDB не инициализирована. Невозможно удалить документы.")
+        if not self.db or not hasattr(self.db, "delete"):
+            print(
+                "ChromaDB не инициализирована или не поддерживает удаление. Невозможно удалить документы."
+            )
             return
 
         if doc_ids:
             try:
-                self.db.delete(ids=doc_ids)
+                if hasattr(self.db, "_collection"):
+                    self.db.delete(ids=doc_ids)
                 print(f"Удалено {len(doc_ids)} старых чанков из ChromaDB.")
             except Exception as e:
                 print(f"Ошибка при удалении чанков из ChromaDB: {e}")
@@ -283,12 +309,14 @@ class VectorDatabase:
         except Exception as e:
             print(f"Ошибка при обработке кэша: {e}")
 
-    def cleanup_expired_cache_entries(self, ttl_days: float):
+    def cleanup_expired_cache_entries(self, ttl_days: float) -> None:
         """
         Удаляет записи из семантического кэша, срок жизни которых истек (старше ttl_days).
         """
-        if not self.cache_db:
-            print("Кэш ChromaDB не инициализирован. Пропускаем очистку.")
+        if not self.cache_db or not hasattr(self.cache_db, "_collection"):
+            print(
+                "Кэш ChromaDB не инициализирован или не имеет коллекции. Пропускаем очистку."
+            )
             return
 
         try:
@@ -1028,7 +1056,7 @@ class RAGSystem:
         print(f"\n--- Обработка запроса: {question} ---")
 
         # Try cache first if enabled
-        if use_cache:
+        if use_cache and self.vector_db:
             cached_answer = self.vector_db.get_cached_answer(question)
             if cached_answer:
                 print("Ответ найден в кэше.")

@@ -62,7 +62,9 @@ class VectorDatabase:
 
     def load_or_create(self, force_recreate: bool = False) -> None:
         """
-        Загружает или создает основную коллекцию ChromaDB.
+        Загружает или создает основную коллекцию ChromaDB для документов.
+        Если force_recreate=True, то существующая папка коллекции будет удалена,
+        а новая коллекция будет создана.
         """
         if force_recreate:
             if os.path.exists(self.db_path):
@@ -116,19 +118,16 @@ class VectorDatabase:
     def add_to_cache(
         self, question: str, answer: str, sources: Optional[List[str]] = None
     ) -> bool:
-        """Adds question-answer pair to semantic cache.
-
-        Args:
-            question: The question text to cache
-            answer: The answer text to cache
-            sources: Optional list of source document names
-
-        Returns:
-            bool: True if successfully added, False on error
         """
-        """
-        Добавляет вопрос и соответствующий ответ в кэш ChromaDB.
-        Возвращает True если запись успешно добавлена, False в случае ошибки.
+        Добавляет вопрос-ответную пару в семантический кэш.
+
+        Аргументы:
+            question: текст вопроса, который будет кэшироваться
+            answer: текст ответа, который будет кэшироваться
+            sources: необязательный список имен исходных документов
+
+        Возвращает:
+            bool: True, если запись успешно добавлена, False в случае ошибки
         """
         try:
             if not self.cache_db:
@@ -167,18 +166,19 @@ class VectorDatabase:
         question: str,
         similarity_threshold: float = 0.1,
     ) -> Optional[str]:
-        """Searches for cached answer to similar question.
+        """
+        Ищет кэшированный ответ на похожий вопрос.
 
-        Args:
-            question: The question to search for
-            similarity_threshold: Max L2 distance for match (0-1)
+        Аргументы:
+            question: Вопрос, который нужно найти
+            similarity_threshold: Максимальная дистанция L2 для совпадения (0-1)
 
-        Returns:
-            Optional[str]: Cached answer if found, else None
+        Возвращает:
+            Optional[str]: Кэшированный ответ, если найден, иначе None
 
-        Raises:
-            ValueError: If question is empty or invalid
-            TypeError: If similarity_threshold is not numeric
+        Исключения:
+            ValueError: Если вопрос пустой или недопустимый
+            TypeError: Если similarity_threshold не является числом
         """
         if not question or not isinstance(question, str):
             raise ValueError("Question must be a non-empty string")
@@ -208,15 +208,16 @@ class VectorDatabase:
             return None
 
     def delete_documents(self, doc_ids: List[str]) -> None:
-        """Deletes documents from ChromaDB by their IDs.
+        """
+        Удаляет документы из ChromaDB по их ID.
 
-        Args:
-            doc_ids: List of document IDs to delete
+        Аргументы:
+            doc_ids: Список ID документов для удаления
 
-        Raises:
-            TypeError: If doc_ids is not a list or contains non-string items
-            ValueError: If doc_ids is empty
-            RuntimeError: If ChromaDB operations fail
+        Исключения:
+            TypeError: Если doc_ids не является списком или содержит нестроковые элементы
+            ValueError: Если doc_ids пустой
+            RuntimeError: Если операции ChromaDB неудачны
         """
         if not isinstance(doc_ids, list):
             raise TypeError("doc_ids must be a list")
@@ -268,14 +269,15 @@ class VectorDatabase:
             ) from e
 
     def delete_cached_entries_by_source(self, source_file_name: str) -> None:
-        """Deletes cache entries associated with the specified source file.
+        """
+        Удаляет записи кэша, связанные с указанным файлом-источником.
 
-        Args:
-            source_file_name: Name of the source file to delete entries for
+        Аргументы:
+            source_file_name: Имя файла-источника, для которого нужно удалить записи
 
-        Raises:
-            TypeError: If source_file_name is not a string
-            RuntimeError: If cache operations fail
+        Генерирует:
+            TypeError: Если source_file_name не является строкой
+            RuntimeError: Если операции с кэшем завершаются с ошибкой
         """
         if not isinstance(source_file_name, str):
             raise TypeError("source_file_name must be a string")
@@ -363,15 +365,16 @@ class VectorDatabase:
             raise RuntimeError(f"Ошибка при обработке кэша: {e}")
 
     def cleanup_expired_cache_entries(self, ttl_days: float) -> None:
-        """Cleans up expired entries from the semantic cache.
+        """
+        Очищает просроченные записи из семантического кэша.
 
-        Args:
-            ttl_days: Time-to-live in days for cache entries
+        Аргументы:
+            ttl_days: Время жизни записей кэша в днях
 
-        Raises:
-            TypeError: If ttl_days is not numeric
-            ValueError: If ttl_days is negative
-            RuntimeError: If cache operations fail
+        Генерирует:
+            TypeError: Если ttl_days не является числом
+            ValueError: Если ttl_days отрицательное
+            RuntimeError: Если операции с кэшем завершаются с ошибкой
         """
         if not isinstance(ttl_days, (int, float)):
             raise TypeError("ttl_days must be numeric")
@@ -522,23 +525,24 @@ def update_document_in_chroma(
     current_last_modified: float,
     stored_doc_id: Optional[str] = None,
 ) -> tuple[List[Document], List[str]]:
-    """Updates document in ChromaDB by removing old chunks and adding new ones.
+    """
+    Обновляет документ в ChromaDB, удаляя старые чанки и добавляя новые.
 
-    Args:
-        vector_db: VectorDatabase instance
-        file_path: Path to the file being updated
-        full_text_content: Full text content of the document
-        metadata: Metadata for the document
-        current_file_hash: Current hash of the file
-        current_last_modified: Last modified timestamp
-        stored_doc_id: Optional existing document ID to update
+    Аргументы:
+        vector_db: Экземпляр VectorDatabase
+        file_path: Путь к файлу, который обновляется
+        full_text_content: Полное текстовое содержимое документа
+        metadata: Метаданные для документа
+        current_file_hash: Текущий хэш файла
+        current_last_modified: Метка времени последнего изменения
+        stored_doc_id:.Optional существующий ID документа, который обновляется
 
-    Returns:
-        tuple: (List of new Document chunks, List of new ChromaDB IDs)
+    Возвращает:
+        tuple: (Список новых Document chunks, Список новых ID ChromaDB)
 
-    Raises:
-        TypeError: If input parameters are invalid
-        RuntimeError: If ChromaDB operations fail
+    Вызывает:
+        TypeError: Если параметры ввода недействительны
+        RuntimeError: Если операции ChromaDB завершаются неудачно
     """
     if not isinstance(vector_db, VectorDatabase):
         raise TypeError("vector_db must be a VectorDatabase instance")
@@ -619,18 +623,19 @@ def update_document_in_chroma(
 
 
 def process_catalog_data(file_path: str, vector_db: VectorDatabase) -> List[Document]:
-    """Processes catalog JSON file into documents and indexes them in ChromaDB.
+    """
+    Обрабатывает JSON файл каталога в документы и индексирует их в ChromaDB.
 
-    Args:
-        file_path: Path to JSON catalog file
-        vector_db: VectorDatabase instance to use
+    Аргументы:
+        file_path: Путь к JSON файлу каталога
+        vector_db: Экземпляр VectorDatabase для использования
 
-    Returns:
-        List of processed Document objects
+    Возвращает:
+        Список обработанных объектов Document
 
-    Raises:
-        TypeError: If input parameters are invalid
-        RuntimeError: If processing fails
+    Исключения:
+        TypeError: Если входные параметры неверны
+        RuntimeError: Если обработка завершилась ошибкой
     """
     if not isinstance(file_path, str):
         raise TypeError("file_path must be a string")
@@ -912,18 +917,19 @@ def process_catalog_data(file_path: str, vector_db: VectorDatabase) -> List[Docu
 
 
 def parse_files(directory: str, vector_db: VectorDatabase) -> List[Document]:
-    """Parses files from directory and indexes them in ChromaDB.
+    """
+    Разбирает файлы из директории и индексирует их в ChromaDB.
 
-    Args:
-        directory: Directory path to parse files from
-        vector_db: VectorDatabase instance to use
+    Аргументы:
+        directory: Путь к директории, из которой разбирать файлы
+        vector_db: Экземпляр VectorDatabase, используемый для индексации
 
-    Returns:
-        List of processed Document objects
+    Возвращает:
+        Список разобранных объектов Document
 
-    Raises:
-        TypeError: If input parameters are invalid
-        RuntimeError: If parsing fails
+    Генерирует исключения:
+        TypeError: Если входные параметры недействительны
+        RuntimeError: Если разбор файлов не удается
     """
     if not isinstance(directory, str):
         raise TypeError("directory must be a string")
@@ -1119,15 +1125,16 @@ def parse_files(directory: str, vector_db: VectorDatabase) -> List[Document]:
 
 
 def cleanup_deleted_files(vector_db: VectorDatabase, input_dir: str) -> None:
-    """Checks for deleted files and removes their entries from ChromaDB.
+    """
+    Проверяет на удаленные файлы и удаляет их записи из ChromaDB.
 
-    Args:
-        vector_db: VectorDatabase instance to check
-        input_dir: Directory to check for existing files
+    Аргументы:
+        vector_db: Экземпляр VectorDatabase для проверки
+        input_dir: Директория для проверки на существование файлов
 
-    Raises:
-        TypeError: If input parameters are invalid
-        RuntimeError: If ChromaDB operations fail
+    Generators:
+        TypeError: Если аргументы переданы некорректно
+        RuntimeError: Если операции с ChromaDB fail
     """
     if not isinstance(vector_db, VectorDatabase):
         raise TypeError("vector_db must be a VectorDatabase instance")
@@ -1358,18 +1365,19 @@ class RAGSystem:
             self.retriever = None
 
     def query(self, question: str, use_cache: bool = True) -> str:
-        """Processes user query using RAG system and cache.
+        """
+        Обрабатывает запрос пользователя с помощью системы RAG и кэша.
 
-        Args:
-            question: The question to answer
-            use_cache: Whether to use semantic cache
+        Аргументы:
+            question: Вопрос, который нужно ответить
+            use_cache: Использовать семантический кэш
 
-        Returns:
-            str: The generated answer
+        Возвращает:
+            str: Сгенерированный ответ
 
-        Raises:
-            ValueError: If question is invalid
-            RuntimeError: If query processing fails
+        Генерирует исключения:
+            ValueError: Если вопрос невалидный
+            RuntimeError: Если обработка запроса не удалась
         """
         if not question or not isinstance(question, str):
             raise ValueError("Question must be a non-empty string")
